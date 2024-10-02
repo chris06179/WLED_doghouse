@@ -6,7 +6,7 @@
 #endif
 
 
-#include <dht_nonblocking.h>
+#include "dht_nonblocking.h"
 
 // USERMOD_DHT_DHTTYPE:
 //   11   // DHT 11
@@ -43,6 +43,12 @@
 #endif
 #endif
 
+#ifdef USERMOD_DHT_PIN_IN
+#define DHTPIN2 USERMOD_DHT_PIN_IN
+#else
+#define DHTPIN2 21
+#endif
+
 // the frequency to check sensor, 1 minute
 #ifndef USERMOD_DHT_MEASUREMENT_INTERVAL
 #define USERMOD_DHT_MEASUREMENT_INTERVAL 60000
@@ -58,12 +64,14 @@
 #define DHT_TIMEOUT_TIME  10000
 
 DHT_nonblocking dht_sensor(DHTPIN, DHTTYPE);
+DHT_nonblocking dht_sensorIn(DHTPIN2, DHTTYPE);
 
 class UsermodDHT : public Usermod {
   private:
     unsigned long nextReadTime = 0;
     unsigned long lastReadTime = 0;
     float humidity, temperature = 0;
+    float humidityIn, temperatureIn = 0;
     bool initializing = true;
     bool disabled = false;
     #ifdef USERMOD_DHT_MQTT
@@ -161,6 +169,53 @@ class UsermodDHT : public Usermod {
         #endif
       }
 
+      float tempCIn;
+      if (dht_sensorIn.measure(&tempCIn, &humidityIn)) {
+        #ifdef USERMOD_DHT_CELSIUS
+        temperatureIn = tempCIn;
+        #else
+        temperature = tempC * 9 / 5 + 32;
+        #endif
+
+        #ifdef USERMOD_DHT_MQTT
+        // 10^n where n is number of decimal places to display in mqtt message. Please adjust buff size together with this constant
+        #define FLOAT_PREC 100
+        if (WLED_MQTT_CONNECTED) {
+          char buff[10];
+
+          strcpy(dhtMqttTopic + dhtMqttTopicLen, "/temperature");
+          sprintf(buff, "%d.%d", (int)temperature, ((int)(temperature * FLOAT_PREC)) % FLOAT_PREC);
+          mqtt->publish(dhtMqttTopic, 0, false, buff);
+
+          sprintf(buff, "%d.%d", (int)humidity, ((int)(humidity * FLOAT_PREC)) % FLOAT_PREC);
+          strcpy(dhtMqttTopic + dhtMqttTopicLen, "/humidity");
+          mqtt->publish(dhtMqttTopic, 0, false, buff);
+
+          dhtMqttTopic[dhtMqttTopicLen] = '\0';
+        }
+        #undef FLOAT_PREC
+        #endif
+
+        nextReadTime = millis() + USERMOD_DHT_MEASUREMENT_INTERVAL;
+        lastReadTime = millis();
+        initializing = false;
+
+        #ifdef USERMOD_DHT_STATS
+        unsigned long icalc = millis() - currentIteration;
+        if (icalc > maxIteration) {
+          maxIteration = icalc;
+        }
+        if (icalc > DHT_TIMEOUT_TIME) {
+          errors += icalc/DHT_TIMEOUT_TIME;
+        } else {
+          clean_updates += 1;
+        }
+        updates += 1;
+        currentIteration = 0;
+
+        #endif
+      }
+
       #ifdef USERMOD_DHT_STATS
       dcalc = millis() - dcalc;
       if (dcalc > maxDelay) {
@@ -180,8 +235,11 @@ class UsermodDHT : public Usermod {
       JsonObject user = root["u"];
       if (user.isNull()) user = root.createNestedObject("u");
 
-      JsonArray temp = user.createNestedArray("Temperature");
-      JsonArray hum = user.createNestedArray("Humidity");
+      JsonArray temp = user.createNestedArray("Outside Temperature");
+      JsonArray hum = user.createNestedArray("Outside Humidity");
+
+      JsonArray tempIn = user.createNestedArray("Inside Temperature");
+      JsonArray humIn = user.createNestedArray("Inside Humidity");
 
       #ifdef USERMOD_DHT_STATS
       JsonArray next = user.createNestedArray("next");
@@ -225,11 +283,18 @@ class UsermodDHT : public Usermod {
         temp.add(" sec until read");
         hum.add((nextReadTime - millis()) / 1000);
         hum.add(" sec until read");
+        tempIn.add((nextReadTime - millis()) / 1000);
+        tempIn.add(" sec until read");
+        humIn.add((nextReadTime - millis()) / 1000);
+        humIn.add(" sec until read");
         return;
       }
 
       hum.add(humidity);
       hum.add("%");
+
+      humIn.add(humidityIn);
+      humIn.add("%");
 
       temp.add(temperature);
       #ifdef USERMOD_DHT_CELSIUS
@@ -237,6 +302,27 @@ class UsermodDHT : public Usermod {
       #else
       temp.add("°F");
       #endif
+
+      tempIn.add(temperatureIn);
+      #ifdef USERMOD_DHT_CELSIUS
+      tempIn.add("°C");
+      #else
+      tempIn.add("°F");
+      #endif
+
+      JsonObject sensor = root[F("sensor")];
+      if (sensor.isNull())
+        sensor = root.createNestedObject(F("sensor"));
+
+      JsonObject sensorInside = sensor.createNestedObject("vitalInside");
+        sensorInside["temp"] = temperatureIn;
+        sensorInside["hum"] = humidityIn;
+
+      JsonObject sensorOutside = sensor.createNestedObject("vitalOutside");
+        sensorOutside["temp"] = temperature;
+        sensorOutside["hum"] = humidity;
+
+
     }
 
     uint16_t getId()
